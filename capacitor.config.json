@@ -1,0 +1,9 @@
+{
+  "appId": "com.realistic.app",
+  "appName": "Realism,
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
+
