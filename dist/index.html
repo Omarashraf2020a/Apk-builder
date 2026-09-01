@@ -1,1 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>3D First Person Environment</title>
+  <style>
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: sans-serif;
+      touch-action: none;
+    }
+    #render-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #ui-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    #start-btn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 32px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.8);
+      border: 2px solid #fff;
+      border-radius: 8px;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+    /* Dynamic Invisible Joystick Container */
+    #joystick-container {
+      position: absolute;
+      width: 120px;
+      height: 120px;
+      margin-left: -60px;
+      margin-top: -60px;
+      border-radius: 50%;
+      pointer-events: none;
+      display: none;
+      opacity: 0;
+    }
+    #joystick-knob {
+      position: absolute;
+      top: 35px;
+      left: 35px;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      opacity: 0;
+    }
+  </style>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/RGBELoader.js"></script>
+</head>
+<body>
+
+  <canvas id="render-canvas"></canvas>
+  <div id="ui-overlay">
+    <button id="start-btn">TAP TO START</button>
+    <div id="joystick-container">
+      <div id="joystick-knob"></div>
+    </div>
+  </div>
+
+  <script>
+    // --- SCENE & RENDERER SETUP ---
+    const canvas = document.getElementById('render-canvas');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: "high-performance" });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.35; 
+    renderer.outputEncoding = THREE.sRGBEncoding;
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0xb0d0e6, 0.005);
+
+    const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 1.7, 0);
+
+    // --- LIGHTING ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+
+    const sunLight = new THREE.DirectionalLight(0xfff5e6, 2.8);
+    sunLight.position.set(40, 60, -80);
+    scene.add(sunLight);
+
+    // --- ROBUST WEB AUDIO SYSTEM ---
+    let audioCtx = null;
+    let stepAudioBuffer = null;
+
+    const windAudio = new Audio('soundreality-wind-blowing-457954.mp3');
+    windAudio.loop = true;
+    windAudio.volume = 0.35;
+
+    // Preload & Decode your custom step MP3 into WebAudio memory
+    function initAudioEngine() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      
+      fetch('freesound_community-footsteps-dirt-gravel-6823.mp3')
+        .then(res => res.arrayBuffer())
+        .then(data => audioCtx.decodeAudioData(data))
+        .then(buffer => {
+          stepAudioBuffer = buffer;
+        })
+        .catch(err => console.log('Audio load issue:', err));
+    }
+
+    // Play a single unlooped slice of your footstep sound
+    function playCustomFootstep() {
+      if (!audioCtx || !stepAudioBuffer) return;
+
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+
+      const source = audioCtx.createBufferSource();
+      source.buffer = stepAudioBuffer;
+      source.loop = false; // Prevents endless looping
+
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.value = 1.0; // Max step volume
+
+      source.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      
+      // Play brief 0.3-second footstep hit, then stop automatically
+      source.start(0, 0, 0.3);
+    }
+
+    // --- ASSET LOADING ---
+    const textureLoader = new THREE.TextureLoader();
+
+    new THREE.RGBELoader().load('kloofendal_48d_partly_cloudy_puresky_4k.hdr', (texture) => {
+      texture.mapping = THREE.EquirectangularReflectionMapping;
+      scene.background = texture;
+      scene.environment = texture;
+    });
+
+    const terrainDiff = textureLoader.load('forrest_ground_01_4k.gltf/textures/forrest_ground_01_diff_4k.jpg');
+    const terrainNor  = textureLoader.load('forrest_ground_01_4k.gltf/textures/forrest_ground_01_nor_gl_4k.jpg');
+    const terrainRough= textureLoader.load('forrest_ground_01_4k.gltf/textures/forrest_ground_01_rough_4k.jpg');
+
+    terrainDiff.encoding = THREE.sRGBEncoding;
+
+    [terrainDiff, terrainNor, terrainRough].forEach(tex => {
+      tex.wrapS = THREE.RepeatWrapping;
+      tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(60, 60);
+    });
+
+    const groundMat = new THREE.MeshStandardMaterial({
+      map: terrainDiff,
+      normalMap: terrainNor,
+      normalScale: new THREE.Vector2(1.5, 1.5),
+      roughnessMap: terrainRough,
+      roughness: 0.65
+    });
+
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    // --- DYNAMIC INVISIBLE TOUCH CONTROLS ---
+    let moveVector = { x: 0, y: 0 };
+    let isMoving = false;
+    let yaw = 0, pitch = 0;
+    let touchStartX = 0, touchStartY = 0;
+    
+    let activeMoveTouchId = null;
+    let activeLookTouchId = null;
+    let joystickOriginX = 0, joystickOriginY = 0;
+
+    const joystickContainer = document.getElementById('joystick-container');
+    const joystickKnob = document.getElementById('joystick-knob');
+    const startBtn = document.getElementById('start-btn');
+
+    startBtn.addEventListener('click', () => {
+      initAudioEngine();
+      windAudio.play().catch(() => {});
+      startBtn.style.display = 'none';
+      joystickContainer.style.display = 'block';
+    });
+
+    function getTouchDivisionX() {
+      return window.innerWidth / 2;
+    }
+
+    window.addEventListener('touchstart', (e) => {
+      const splitX = getTouchDivisionX();
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+        
+        if (touch.clientX <= splitX && activeMoveTouchId === null) {
+          activeMoveTouchId = touch.identifier;
+          joystickOriginX = touch.clientX;
+          joystickOriginY = touch.clientY;
+
+          joystickContainer.style.left = `${joystickOriginX}px`;
+          joystickContainer.style.top = `${joystickOriginY}px`;
+          joystickKnob.style.transform = `translate(0px, 0px)`;
+        }
+        
+        if (touch.clientX > splitX && activeLookTouchId === null) {
+          activeLookTouchId = touch.identifier;
+          touchStartX = touch.clientX;
+          touchStartY = touch.clientY;
+        }
+      }
+    });
+
+    window.addEventListener('touchmove', (e) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+
+        if (touch.identifier === activeMoveTouchId) {
+          let deltaX = touch.clientX - joystickOriginX;
+          let deltaY = touch.clientY - joystickOriginY;
+          const distance = Math.min(Math.hypot(deltaX, deltaY), 45);
+          const angle = Math.atan2(deltaY, deltaX);
+
+          const knobX = Math.cos(angle) * distance;
+          const knobY = Math.sin(angle) * distance;
+          joystickKnob.style.transform = `translate(${knobX}px, ${knobY}px)`;
+
+          if (distance > 5) {
+            moveVector.x = knobX / 45;
+            moveVector.y = knobY / 45;
+            isMoving = true;
+          } else {
+            moveVector = { x: 0, y: 0 };
+            isMoving = false;
+          }
+        }
+
+        if (touch.identifier === activeLookTouchId) {
+          const deltaX = touch.clientX - touchStartX;
+          const deltaY = touch.clientY - touchStartY;
+
+          yaw -= deltaX * 0.003;
+          pitch -= deltaY * 0.003; 
+
+          pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
+          camera.rotation.set(pitch, yaw, 0, 'YXZ');
+
+          touchStartX = touch.clientX;
+          touchStartY = touch.clientY;
+        }
+      }
+    });
+
+    const handleTouchEnd = (e) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const touch = e.changedTouches[i];
+
+        if (touch.identifier === activeMoveTouchId) {
+          activeMoveTouchId = null;
+          moveVector = { x: 0, y: 0 };
+          isMoving = false;
+          joystickKnob.style.transform = `translate(0px, 0px)`;
+        }
+
+        if (touch.identifier === activeLookTouchId) {
+          activeLookTouchId = null;
+        }
+      }
+    };
+
+    window.addEventListener('touchend', handleTouchEnd);
+    window.addEventListener('touchcancel', handleTouchEnd);
+
+    // --- ANIMATION LOOP ---
+    const clock = new THREE.Clock();
+    let stepTimer = 0;
+    const stepInterval = 0.45; // Time between steps in seconds
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const time = clock.getElapsedTime();
+
+      if (isMoving && (Math.abs(moveVector.x) > 0.05 || Math.abs(moveVector.y) > 0.05)) {
+        const speed = 3.5 * delta;
+        const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+        const side = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+
+        camera.position.addScaledVector(forward, -moveVector.y * speed);
+        camera.position.addScaledVector(side, moveVector.x * speed);
+
+        camera.position.y = 1.7 + Math.sin(time * 10) * 0.035;
+
+        stepTimer += delta;
+        if (stepTimer >= stepInterval) {
+          playCustomFootstep();
+          stepTimer = 0;
+        }
+      } else {
+        stepTimer = stepInterval; // Instantly ready for the next step when moving resumes
+        camera.position.y = THREE.MathUtils.lerp(camera.position.y, 1.7, 0.1);
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    function handleResize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    }
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('orientationchange', () => { setTimeout(handleResize, 100); });
+  </script>
+</body>
+</html>
